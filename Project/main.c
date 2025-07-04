@@ -17,10 +17,12 @@ uint8_t password_length = 0;
 
 void keypad_init(void)
 {
-    DDRA = 0xFF; // Set pins  of PORTA as output (for rows) (0-3)
+    //DDRA = 0xFF; // Set pins  of PORTA as output (for rows) (0-3)
+    DDRA = 0x0F;
     DDRD = 0xFF;
-    DDRB = 0x00; // Set pins of PORTB as input (for columns) (4-7)
-    PORTB = 0xFF; // Set pull-up resistors on PORTB (columns)
+    //DDRB = 0x00; // Set pins of PORTB as input (for columns) (4-7)
+    //PORTB = 0xFF; // Set pull-up resistors on PORTB (columns)
+    PORTA = 0xFF;
 }
 
 char keypad_characters[4][4] = {
@@ -38,7 +40,7 @@ char get_keypad_key(void)
     for (uint8_t row = 0; row < 4; row++)
     {
         // Step 1: Set all row pins (PA0-PA3) HIGH first
-        PORTA = 0x0F; // Ensure PA0-PA3 are HIGH. This clears any lingering low states from previous scans.
+        PORTA = 0xFF; // Ensure PA0-PA3 are HIGH. This clears any lingering low states from previous scans.
 
         // Step 2: Set the current row low
         PORTA &= ~(1 << row); // Drives PA0, PA1, PA2, PA3 low sequentially
@@ -47,10 +49,10 @@ char get_keypad_key(void)
         // Check each column
         for (uint8_t col = 0; col < 4; col++)
         {
-            if (!(PINB & (1 << col))) // Column pins are PB0, PB1, PB2, PB3
+            if (!(PINA & (1 << (col + 4)))) // Column pins are PB0, PB1, PB2, PB3
             {
                 // Wait for key release (debounce)
-                while (!(PINB & (1 << col)));
+                while (!(PINA & (1 << (col + 4))));
                 
                 // Set the current row high again immediately after detection
                 PORTA |= (1 << row);
