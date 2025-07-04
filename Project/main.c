@@ -8,6 +8,7 @@
 #include <avr/io.h>
 #include <util/delay.h>
 #include <string.h>
+#include "lcd.h"
 
 #define MAX_PASSWORD_LENGTH 4
 
@@ -17,11 +18,8 @@ uint8_t password_length = 0;
 
 void keypad_init(void)
 {
-    //DDRA = 0xFF; // Set pins  of PORTA as output (for rows) (0-3)
     DDRA = 0x0F;
-    DDRD = 0xFF;
-    //DDRB = 0x00; // Set pins of PORTB as input (for columns) (4-7)
-    //PORTB = 0xFF; // Set pull-up resistors on PORTB (columns)
+    DDRB = 0xFF;
     PORTA = 0xFF;
 }
 
@@ -76,24 +74,33 @@ void keypad_scan(void)
     {
         return;
     }
-    PORTD = 0x04;
+    PORTB = 0x04;
     _delay_ms(50); // Debounce delay
-    PORTD = 0x00; // Clear PORTD after debounce
+    PORTB = 0x00; // Clear PORTD after debounce
     if(key == '#') // Check if the '#' key is pressed
     {
         if (strcmp(entered_password, password) == 0) // Compare entered password with the correct one
         {
             // Password is correct, perform action
-            PORTD = 0x01; // For example, turn on an LED connected to PORTD
+            PORTB = 0x01; // For example, turn on an LED connected to PORTD
+            lcd_cmd(0x01); // Clear LCD
+            _delay_ms(2); // Wait for the clear command to complete
+            lcd_cmd(0x80); // Clear LCD
+            lcd_print("Access Granted");
             _delay_ms(1000); // Keep the LED on for 1 second
-            PORTD = 0x00; // Turn off the LED
+            PORTB = 0x00; // Turn off the LED
         }
         else
         {
             // Password is incorrect, handle accordingly
-            PORTD = 0x02; // For example, turn on another LED connected to PORTD
+            PORTB = 0x02; // For example, turn on another LED connected to PORTD
+            lcd_cmd(0x01); // Clear LCD
+            _delay_ms(2); // Wait for the clear command to complete
+            lcd_cmd(0x80); // Clear LCD
+
+            lcd_print("Access Denied");
             _delay_ms(1000); // Keep the LED on for 1 second
-            PORTD = 0x00; // Turn off the LED
+            PORTB = 0x00; // Turn off the LED
         }
         entered_password[0] = '\0'; // Reset entered password after checking
         password_length = 0; // Reset password length
@@ -136,6 +143,10 @@ void keypad_scan(void)
 int main(void)
 {
     keypad_init(); // Initialize the keypad
+    LCD_DDR_DATA |= 0xF0; // D4-D7 ouotput
+    LCD_DDR_CTRL |= (1 << RS) | (1 << E); // PC6, PC7 output
+    lcd_init();
+    lcd_print("Enter PIN:");
     while (1) 
     {
         keypad_scan(); // Scan the keypad for key presses
