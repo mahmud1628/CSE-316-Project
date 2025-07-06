@@ -81,3 +81,15 @@ void lcd_print(char *str) {
 		lcd_data(*str++);
 	}
 }
+
+void lcd_write_at_first_line(char *str) {
+	lcd_cmd(0x01); // Clear LCD
+	_delay_ms(2); // Wait for the clear command to complete
+	lcd_cmd(0x80); // Move to the first line
+	lcd_print(str);
+}
+
+void lcd_write_at_second_line(char *str) {
+	lcd_cmd(0xC0); // Move to the second line
+	lcd_print(str);
+}

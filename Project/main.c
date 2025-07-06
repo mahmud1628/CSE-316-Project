@@ -9,18 +9,112 @@
 #include <util/delay.h>
 #include <string.h>
 #include "lcd.h"
+#include <avr/interrupt.h>
 
-#define MAX_PASSWORD_LENGTH 4
+#define NOT_ARMED 0
+#define PARTIALLY_ARMED 1
+#define FULLY_ARMED 2
+#define MAX_PASSWORD_LENGTH 16
 
 const char * password = "1234";
+const char * master_password = "0000";
 char entered_password[MAX_PASSWORD_LENGTH + 1] = "\0"; // Initialize with null terminator
+char master_entered_password[MAX_PASSWORD_LENGTH + 1] = "\0"; // Initialize with null terminator
 uint8_t password_length = 0;
+uint8_t master_password_length = 0; // Length of the master password
+uint8_t incorrect_attempts = 0;
+uint8_t master_incorrect_attempts = 0; // Counter for incorrect master password attempts
+uint8_t is_blocked = 0; // Flag to indicate if the system is blocked
+uint8_t door_opened = 0; // Flag to indicate if the door is opened
+uint8_t armed_status = NOT_ARMED; // Initial armed status
+uint8_t is_authorized = 0; // Flag to indicate if the user is authorized
+uint8_t door_opened_reed_switch = 0; // Flag to indicate if the door is opened by the reed switch
+uint8_t buzzer_type = 0; // 0 no sound, 1 beep beep, 2 continuous sound
+uint8_t master_login_period = 0; // Flag to indicate if the master login period is active
+uint8_t is_master_logged_in = 0; // Flag to indicate if the master is logged in
+
+// INT0 -> reed switch (1)
+ISR(INT0_vect)
+{
+    if(!is_authorized){
+        lcd_write_at_first_line("Unauthorized");
+        is_blocked = 1; // Set the blocked flag
+        buzzer_type = 2; // Set buzzer type to continuous sound
+        PORTB |= (1 << PB0); // Turn on an Buzzer connected to PB0
+        return; // Exit the ISR if not authorized
+    }
+}
+
+// INT1 -> PIR (1)
+ISR(INT1_vect)
+{
+    if(!is_authorized){
+        lcd_write_at_first_line("Motion Detected");
+        is_blocked = 1; // Set the blocked flag
+        buzzer_type = 2; // Set buzzer type to continuous sound
+        PORTB |= (1 << PB0); // Turn on an Buzzer connected to PB0
+        return; // Exit the ISR if not authorized
+    }
+}
+
+void enable_int0(void)
+{
+    GICR |= (1 << INT0); // Enable external interrupt INT0
+    MCUCR |= (1 << ISC01) | (1 << ISC00); // Set INT0 to trigger on rising edge
+}
+
+void disable_int0(void)
+{
+    GICR &= ~(1 << INT0); // Disable external interrupt INT0
+}
+
+void enable_int1(void)
+{
+    GICR |= (1 << INT1); // Enable external interrupt INT1
+    MCUCR |= (1 << ISC11) | (1 << ISC10); // Set INT1 to trigger on rising edge
+}
+
+void disable_int1(void)
+{
+    GICR &= ~(1 << INT1); // Disable external interrupt INT1
+}
+
+void turn_on_buzzer(void)
+{
+    PORTB |= (1 << PB0);
+}
+
+void turn_off_buzzer(void)
+{
+    PORTB &= ~(1 << PB0);
+}
+
+void interrupt_init(void)
+{
+    GICR |= (1 << INT0);      // Enable external interrupt INT0
+	GICR |= (1 << INT1);
+    MCUCR |= (1 << ISC01) | (1 << ISC00); // rising edge for INT0
+    MCUCR |= (1 << ISC11) | (1 << ISC10); // rising edge for INT1
+    // GIFR |= (1 << INTF0);     // Clear any pending INT0 interrupt flag
+    // DDRD &= ~(1 << PD2); // Set PD2 as input for INT0
+    // PORTD |= (1 << PD2); // Enable pull-up resistor on PD2
+}
 
 void keypad_init(void)
 {
     DDRA = 0x0F;
     DDRB = 0xFF;
     PORTA = 0xFF;
+}
+
+void beep(void)
+{
+    for(int i = 0; i < 5; i++){
+        turn_on_buzzer(); // Turn on the buzzer
+        _delay_ms(50); // Beep duration
+        turn_off_buzzer(); // Turn off the buzzer
+        _delay_ms(50); // Delay between beeps
+    }
 }
 
 char keypad_characters[4][4] = {
@@ -32,8 +126,6 @@ char keypad_characters[4][4] = {
 
 char get_keypad_key(void)
 {
-    // The previous DDRA = 0xFF; in init is fine for now, but 0x0F is cleaner
-    // And PORTA = 0xFF; in init should be fine to set all outputs high initially.
 
     for (uint8_t row = 0; row < 4; row++)
     {
@@ -58,9 +150,6 @@ char get_keypad_key(void)
                 return keypad_characters[row][col];
             }
         }
-        
-        // No key found in this row, set it high again before moving to next row
-        // This line is technically redundant if you do PORTA |= 0x0F at the start of the loop
         PORTA |= (1 << row); 
     }
     
@@ -70,83 +159,200 @@ char get_keypad_key(void)
 void keypad_scan(void)
 {
     char key = get_keypad_key();
-    if( key == '\0' )
+    if( key == '\0' ) return;
+    if(key == '#') // Check if the '#' key is pressed , for entering password
     {
-        return;
-    }
-    PORTB = 0x04;
-    _delay_ms(50); // Debounce delay
-    PORTB = 0x00; // Clear PORTD after debounce
-    if(key == '#') // Check if the '#' key is pressed
-    {
+        if(master_login_period) // If in master login period
+        {
+            if(strcmp(master_entered_password, master_password) == 0) // Compare entered master password with the correct one
+            {
+                // Master password is correct, perform action
+                lcd_write_at_first_line("Master Access");
+                is_master_logged_in = 1; // Set the master login flag
+                master_login_period = 0; // Reset the master login period flag
+                master_incorrect_attempts = 0; // Reset incorrect attempts for master password
+            }
+            else
+            {
+                master_incorrect_attempts++; // Increment the incorrect attempts counter
+                if(master_incorrect_attempts >= 3) {            // Master password is incorrect, handle accordingly
+                    master_incorrect_attempts = 0; // Reset attempts after showing message
+                    beep(); // Call the beep function to indicate blocking
+                    return;
+                }
+                else {
+                    lcd_write_at_first_line("Access Denied");
+                    _delay_ms(250); // Keep the LED on for 1 second
+                    lcd_write_at_first_line("Enter master PIN");
+                }
+            }
+            master_entered_password[0] = '\0'; // Reset entered master password after checking
+            master_password_length = 0; // Reset master password length
+            return;
+        }
         if (strcmp(entered_password, password) == 0) // Compare entered password with the correct one
         {
             // Password is correct, perform action
-            PORTB = 0x01; // For example, turn on an LED connected to PORTD
-            lcd_cmd(0x01); // Clear LCD
-            _delay_ms(2); // Wait for the clear command to complete
-            lcd_cmd(0x80); // Clear LCD
-            lcd_print("Access Granted");
-            _delay_ms(1000); // Keep the LED on for 1 second
-            PORTB = 0x00; // Turn off the LED
+            lcd_write_at_first_line("Access Granted");
+            _delay_ms(500);
+            lcd_write_at_first_line("Door Opened");
+            door_opened = 1; // Set the door opened flag
+            is_authorized = 1; // Set the authorized flag
         }
         else
         {
-            // Password is incorrect, handle accordingly
-            PORTB = 0x02; // For example, turn on another LED connected to PORTD
-            lcd_cmd(0x01); // Clear LCD
-            _delay_ms(2); // Wait for the clear command to complete
-            lcd_cmd(0x80); // Clear LCD
+            incorrect_attempts++; // Increment the incorrect attempts counter
+            if(incorrect_attempts >= 3) {            // Password is incorrect, handle accordingly
+                lcd_write_at_first_line("System Blocked");
+                incorrect_attempts = 0; // Reset attempts after showing message
+                is_blocked = 1; // Set the blocked flag
 
-            lcd_print("Access Denied");
-            _delay_ms(1000); // Keep the LED on for 1 second
-            PORTB = 0x00; // Turn off the LED
+                beep(); // Call the beep function to indicate blocking
+                return;
+            }
+            else {
+                lcd_write_at_first_line("Access Denied");
+                _delay_ms(250); // Keep the LED on for 1 second
+                lcd_write_at_first_line("Enter PIN");
+            }
+
         }
         entered_password[0] = '\0'; // Reset entered password after checking
         password_length = 0; // Reset password length
     }
     else if (key == '*') // Check if the '*' key is pressed to reset the entered password
     {
-        entered_password[0] = '\0'; // Reset entered password
-        password_length = 0; // Reset password length
+        if(master_login_period)
+        {
+            master_entered_password[0] = '\0'; // Reset entered password
+            master_password_length = 0; // Reset password length    
+        }
+        else 
+        {
+            entered_password[0] = '\0'; // Reset entered password
+            password_length = 0; // Reset password length
+        }
+        lcd_write_at_second_line("                ");
     }
-    else if(key == 'A') 
+    else if(key == 'A') // used to close the door if it is opened
     {
+        if(door_opened)
+        {
+            lcd_write_at_first_line("Door Closed");
+            door_opened = 0; // Reset the door opened flag
+            _delay_ms(500); // Keep the message on for 1 second
+            lcd_write_at_first_line("Enter PIN");
+            return; // Exit the function after closing the door
+        }
         // Handle 'A' key press, for example, you can implement a specific action
     }
-    else if(key == 'B') 
+    else if(key == 'B') // enable system from blocked state by only master
     {
+        if(is_blocked && is_master_logged_in)
+        {
+            turn_off_buzzer();
+            is_blocked = 0; // Reset the blocked flag
+            lcd_write_at_first_line("System Enabled");
+            _delay_ms(500);
+            lcd_write_at_first_line("Master access");
+            return;            
+        }
         // Handle 'B' key press, for example, you can implement a specific action
     }
-    else if(key == 'C') 
+    else if(key == 'C') // for mode change
     {
         // Handle 'C' key press, for example, you can implement a specific action
     }
-    else if(key == 'D') 
+    else if(key == 'D') // for master login
     {
-        // Handle 'D' key press, for example, you can implement a specific action
+        if(is_master_logged_in)
+        {
+            is_master_logged_in = 0; // Reset the master login flag
+            lcd_write_at_first_line("Normal mode");
+            _delay_ms(500); // Keep the message on for 1 second
+            lcd_write_at_first_line("Enter PIN");
+            return; // Exit the function after logging out
+        }
+        if(!master_login_period)
+        {
+            master_login_period = 1; // Set the master login period flag
+            lcd_write_at_first_line("Enter Master PIN");
+            master_entered_password[0] = '\0'; // Reset entered master password
+            master_password_length = 0; // Reset master password length
+            return;
+        }
+        if(master_login_period)
+        {
+            master_login_period = 0; // Reset the master login period flag
+            lcd_write_at_first_line("Master Login Ended");
+            _delay_ms(250); // Keep the message on for 1 second
+            lcd_write_at_first_line("Enter PIN");
+            master_entered_password[0] = '\0'; // Reset entered master password
+            master_password_length = 0; // Reset master password length
+            return; // Exit the function after ending master login
+        }
     }
     else
     {
         // Append the pressed key to the entered password
+        if(master_login_period)
+        {
+            master_entered_password[master_password_length] = key; // Store the pressed key
+            char buffer[17];
+            uint8_t star_size = master_password_length;
+            if(star_size > 0){
+                for(uint8_t i = 0; i < star_size; i++) {
+                    buffer[i] = '*';
+                }
+            }
+            buffer[star_size] = key;
+            buffer[star_size + 1] = '\0';
+            lcd_write_at_second_line(buffer); // Display the entered master password on the LCD
+            _delay_ms(15);
+            buffer[star_size] = '*';
+            lcd_write_at_second_line(buffer); // Display the entered master password as stars on the LCD
+            if (master_password_length < MAX_PASSWORD_LENGTH) 
+            {
+                master_password_length++; // Increment the master password length
+            }
+            master_entered_password[master_password_length] = '\0'; // Null-terminate the string
+            return;
+        }
+        // for normal users
+        if(is_blocked || is_master_logged_in) return; // If the system is blocked or master is logged in, do not accept any input from normal userss
         entered_password[password_length] = key; // Store the pressed key
+        char buffer[17]; 
+        uint8_t star_size = password_length;
+        if(star_size > 0){
+            for(uint8_t i = 0; i < star_size; i++) {
+                buffer[i] = '*';
+            }
+        }
+        buffer[star_size] = key;
+        buffer[star_size + 1] = '\0';
+        lcd_write_at_second_line(buffer); // Display the entered password on the LCD
+        _delay_ms(15);
+
+        buffer[star_size] = '*';
+        lcd_write_at_second_line(buffer); // Display the entered password as stars on the LCD
         if (password_length < MAX_PASSWORD_LENGTH) 
         {
             password_length++; // Increment the password length
         }
         entered_password[password_length] = '\0'; // Null-terminate the string
     }
-
 }
 
 
 int main(void)
 {
+    interrupt_init();
     keypad_init(); // Initialize the keypad
     LCD_DDR_DATA |= 0xF0; // D4-D7 ouotput
     LCD_DDR_CTRL |= (1 << RS) | (1 << E); // PC6, PC7 output
     lcd_init();
-    lcd_print("Enter PIN:");
+    lcd_print("Enter PIN");
+    sei(); // Enable global interrupts
     while (1) 
     {
         keypad_scan(); // Scan the keypad for key presses
