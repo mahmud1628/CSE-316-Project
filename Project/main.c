@@ -4,7 +4,7 @@
  * Created: 04-Jul-25 7:58:21 AM
  * Author : User
  */ 
-#define F_CPU 8000000UL
+#define F_CPU 1000000UL
 #include <avr/io.h>
 #include <util/delay.h>
 #include <string.h>
@@ -33,9 +33,123 @@ uint8_t buzzer_type = 0; // 0 no sound, 1 beep beep, 2 continuous sound
 uint8_t master_login_period = 0; // Flag to indicate if the master login period is active
 uint8_t is_master_logged_in = 0; // Flag to indicate if the master is logged in
 
+uint8_t is_lock_opened = 0; // Flag to indicate if the lock is opened
+uint8_t mode_change_period = 0;
+
+void close_lock(void);
+void open_lock(void);
+void mode_change_initialize(void);
+void write_to_lcd_according_to_mode(void);
+void handle_master_login(void);
+void change_mode(char key);
+void beep(void);
+
+void mode_change_initialize(void)
+{
+    mode_change_period = 1;
+    if(armed_status == NOT_ARMED)
+    {
+        lcd_write_at_first_line("Current: Off");
+        lcd_write_at_second_line("1. Semi 2. Full");
+    }
+    else if(armed_status == PARTIALLY_ARMED)
+    {
+        lcd_write_at_first_line("Current: Semi");
+        lcd_write_at_second_line("0. Off 2. Full");
+    }
+    else if(armed_status == FULLY_ARMED)
+    {
+        lcd_write_at_first_line("Current: Full");
+        lcd_write_at_second_line("0. Off 1. Semi");
+    }
+}
+
+void change_mode(char key)
+{
+    if(key == '0') // Off
+    {
+        armed_status = NOT_ARMED;
+        lcd_write_at_first_line("Mode: Off");
+    }
+    else if(key == '1') // Semi
+    {
+        armed_status = PARTIALLY_ARMED;
+        lcd_write_at_first_line("Mode: Semi");
+    }
+    else if(key == '2') // Full
+    {
+        armed_status = FULLY_ARMED;
+        lcd_write_at_first_line("Mode: Full");
+    }
+    mode_change_period = 0; // Reset mode change period
+    _delay_ms(1000);
+    lcd_write_at_first_line("Master access");
+}
+
+void handle_master_login(void)
+{
+    if(strcmp(master_entered_password, master_password) == 0) // Compare entered master password with the correct one
+    {
+        // Master password is correct, perform action
+        lcd_write_at_first_line("Master Access");
+        is_master_logged_in = 1; // Set the master login flag
+        master_login_period = 0; // Reset the master login period flag
+        master_incorrect_attempts = 0; // Reset incorrect attempts for master password
+    }
+    else
+    {
+        master_incorrect_attempts++; // Increment the incorrect attempts counter
+        if(master_incorrect_attempts >= 3) {            // Master password is incorrect, handle accordingly
+            master_incorrect_attempts = 0; // Reset attempts after showing message
+            beep(); // Call the beep function to indicate blocking
+            return;
+        }
+        else {
+            lcd_write_at_first_line("Access Denied");
+            _delay_ms(1000); // Keep the LED on for 1 second
+            lcd_write_at_first_line("Enter master PIN");
+        }
+    }
+    master_entered_password[0] = '\0'; // Reset entered master password after checking
+    master_password_length = 0; // Reset master password length
+}
+
+void write_to_lcd_according_to_mode(void)
+{
+    if(armed_status == NOT_ARMED)
+    {
+        lcd_write_at_first_line("Press # to open");
+        lcd_write_at_second_line("the lock");
+    }
+    else if(armed_status == PARTIALLY_ARMED)
+    {
+        lcd_write_at_first_line("Enter PIN");
+    }
+    else if(armed_status == FULLY_ARMED)
+    {
+        lcd_write_at_first_line("Enter PIN");
+    }
+}
+
 // INT0 -> reed switch (1)
 ISR(INT0_vect)
 {
+    if(is_lock_opened)
+    {
+        // check if door already opened
+        if(door_opened)
+        {
+            door_opened = 0;
+            close_lock(); // Close the lock if it was opened
+        }
+        else 
+        {
+            door_opened = 1;
+            lcd_write_at_first_line("Door Opened");
+        }
+        return;
+    }
+    if(armed_status == NOT_ARMED) return;
     if(!is_authorized){
         lcd_write_at_first_line("Unauthorized");
         is_blocked = 1; // Set the blocked flag
@@ -93,8 +207,8 @@ void interrupt_init(void)
 {
     GICR |= (1 << INT0);      // Enable external interrupt INT0
 	GICR |= (1 << INT1);
-    MCUCR |= (1 << ISC01) | (1 << ISC00); // rising edge for INT0
-    MCUCR |= (1 << ISC11) | (1 << ISC10); // rising edge for INT1
+    MCUCR |= (0<< ISC01) | (1 << ISC00); // rising edge for INT0
+    MCUCR |= (0 << ISC11) | (1 << ISC10); // rising edge for INT1
     // GIFR |= (1 << INTF0);     // Clear any pending INT0 interrupt flag
     // DDRD &= ~(1 << PD2); // Set PD2 as input for INT0
     // PORTD |= (1 << PD2); // Enable pull-up resistor on PD2
@@ -123,6 +237,23 @@ char keypad_characters[4][4] = {
     {'7', '8', '9', 'C'},
     {'*', '0', '#', 'D'}
 };
+
+void open_lock(void)
+{
+    is_lock_opened = 1; // Set the lock opened flag
+    PORTB |= (1 << PB1); // Open the lock by setting PB1 high
+    lcd_write_at_first_line("Lock Opened");
+}
+
+void close_lock(void)
+{
+    is_lock_opened = 0; // Reset the lock opened flag
+    is_authorized = 0; // Reset the authorized flag
+    PORTB &= ~(1 << PB1); // Close the lock by setting PB1 low
+    lcd_write_at_first_line("Lock Closed");
+    _delay_ms(1000); // Keep the message on for 1 second
+    write_to_lcd_according_to_mode();
+}
 
 char get_keypad_key(void)
 {
@@ -164,40 +295,24 @@ void keypad_scan(void)
     {
         if(master_login_period) // If in master login period
         {
-            if(strcmp(master_entered_password, master_password) == 0) // Compare entered master password with the correct one
-            {
-                // Master password is correct, perform action
-                lcd_write_at_first_line("Master Access");
-                is_master_logged_in = 1; // Set the master login flag
-                master_login_period = 0; // Reset the master login period flag
-                master_incorrect_attempts = 0; // Reset incorrect attempts for master password
-            }
-            else
-            {
-                master_incorrect_attempts++; // Increment the incorrect attempts counter
-                if(master_incorrect_attempts >= 3) {            // Master password is incorrect, handle accordingly
-                    master_incorrect_attempts = 0; // Reset attempts after showing message
-                    beep(); // Call the beep function to indicate blocking
-                    return;
-                }
-                else {
-                    lcd_write_at_first_line("Access Denied");
-                    _delay_ms(250); // Keep the LED on for 1 second
-                    lcd_write_at_first_line("Enter master PIN");
-                }
-            }
-            master_entered_password[0] = '\0'; // Reset entered master password after checking
-            master_password_length = 0; // Reset master password length
+            handle_master_login();
+            return;
+        } // master login code completed
+
+        if(armed_status == NOT_ARMED) 
+        {
+            // Handle disarmed state
+            open_lock(); // open the lock
             return;
         }
         if (strcmp(entered_password, password) == 0) // Compare entered password with the correct one
         {
             // Password is correct, perform action
             lcd_write_at_first_line("Access Granted");
-            _delay_ms(500);
-            lcd_write_at_first_line("Door Opened");
-            door_opened = 1; // Set the door opened flag
+            open_lock();
+            _delay_ms(1000);
             is_authorized = 1; // Set the authorized flag
+            incorrect_attempts = 0; // Reset incorrect attempts counter
         }
         else
         {
@@ -212,7 +327,7 @@ void keypad_scan(void)
             }
             else {
                 lcd_write_at_first_line("Access Denied");
-                _delay_ms(250); // Keep the LED on for 1 second
+                _delay_ms(1000); // Keep the LED on for 1 second
                 lcd_write_at_first_line("Enter PIN");
             }
 
@@ -236,15 +351,6 @@ void keypad_scan(void)
     }
     else if(key == 'A') // used to close the door if it is opened
     {
-        if(door_opened)
-        {
-            lcd_write_at_first_line("Door Closed");
-            door_opened = 0; // Reset the door opened flag
-            _delay_ms(500); // Keep the message on for 1 second
-            lcd_write_at_first_line("Enter PIN");
-            return; // Exit the function after closing the door
-        }
-        // Handle 'A' key press, for example, you can implement a specific action
     }
     else if(key == 'B') // enable system from blocked state by only master
     {
@@ -261,16 +367,20 @@ void keypad_scan(void)
     }
     else if(key == 'C') // for mode change
     {
-        // Handle 'C' key press, for example, you can implement a specific action
+        if(is_master_logged_in)
+        {
+            mode_change_initialize();
+        }
+		
     }
-    else if(key == 'D') // for master login
+    else if(key == 'D') // for master login and log out
     {
         if(is_master_logged_in)
         {
             is_master_logged_in = 0; // Reset the master login flag
             lcd_write_at_first_line("Normal mode");
-            _delay_ms(500); // Keep the message on for 1 second
-            lcd_write_at_first_line("Enter PIN");
+            _delay_ms(1000); // Keep the message on for 1 second
+            write_to_lcd_according_to_mode();
             return; // Exit the function after logging out
         }
         if(!master_login_period)
@@ -294,6 +404,10 @@ void keypad_scan(void)
     }
     else
     {
+        if(mode_change_period)
+        {
+            change_mode(key); // Change the mode if in mode change period
+        }
         // Append the pressed key to the entered password
         if(master_login_period)
         {
@@ -351,12 +465,14 @@ int main(void)
     LCD_DDR_DATA |= 0xF0; // D4-D7 ouotput
     LCD_DDR_CTRL |= (1 << RS) | (1 << E); // PC6, PC7 output
     lcd_init();
-    lcd_print("Enter PIN");
+    lcd_write_at_first_line("Press # to open");
+    lcd_write_at_second_line("the lock");
+	_delay_ms(1000);
     sei(); // Enable global interrupts
     while (1) 
     {
         keypad_scan(); // Scan the keypad for key presses
-        _delay_ms(50); // Add a small delay to debounce the keys
+        _delay_ms(100); // Add a small delay to debounce the keys
     }
 }
 
