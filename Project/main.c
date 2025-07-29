@@ -25,7 +25,7 @@ uint8_t master_password_length = 0; // Length of the master password
 uint8_t incorrect_attempts = 0;
 uint8_t master_incorrect_attempts = 0; // Counter for incorrect master password attempts
 uint8_t is_blocked = 0; // Flag to indicate if the system is blocked
-uint8_t door_opened = 0; // Flag to indicate if the door is opened
+volatile uint8_t door_opened = 0; // Flag to indicate if the door is opened
 uint8_t armed_status = NOT_ARMED; // Initial armed status
 uint8_t is_authorized = 0; // Flag to indicate if the user is authorized
 uint8_t door_opened_reed_switch = 0; // Flag to indicate if the door is opened by the reed switch
@@ -33,8 +33,10 @@ uint8_t buzzer_type = 0; // 0 no sound, 1 beep beep, 2 continuous sound
 uint8_t master_login_period = 0; // Flag to indicate if the master login period is active
 uint8_t is_master_logged_in = 0; // Flag to indicate if the master is logged in
 
-uint8_t is_lock_opened = 0; // Flag to indicate if the lock is opened
+volatile uint8_t is_lock_opened = 0; // Flag to indicate if the lock is opened
 uint8_t mode_change_period = 0;
+volatile uint8_t is_close_lock = 0; // Flag to indicate if the lock is closed
+volatile uint8_t rfid_flag = 0;
 
 void close_lock(void);
 void open_lock(void);
@@ -43,9 +45,37 @@ void write_to_lcd_according_to_mode(void);
 void handle_master_login(void);
 void change_mode(char key);
 void beep(void);
+void pir_enable(void);
+void pir_disable(void);
+void send_sms_unauthorized_access(void);
+void send_sms_intruder(void);
+void send_sms_multiple_attempts(void);
+void turn_on_buzzer(void);
+void turn_off_buzzer(void);
+
+void send_sms_intruder(void)
+{
+    PORTB &= ~(1 << PB3);
+}
+
+void send_sms_multiple_attempts(void)
+{
+    PORTB &= ~(1 << PB4);
+}
+
+void send_sms_unauthorized_access(void)
+{
+	PORTB &= ~(1 << PB5);
+}
 
 void mode_change_initialize(void)
 {
+    if(mode_change_period)
+    {
+        mode_change_period = 0;
+        lcd_write_at_first_line("Master access");
+        return;
+    }
     mode_change_period = 1;
     if(armed_status == NOT_ARMED)
     {
@@ -69,21 +99,27 @@ void change_mode(char key)
     if(key == '0') // Off
     {
         armed_status = NOT_ARMED;
+        pir_disable();
         lcd_write_at_first_line("Mode: Off");
     }
     else if(key == '1') // Semi
     {
         armed_status = PARTIALLY_ARMED;
+        pir_disable();
         lcd_write_at_first_line("Mode: Semi");
     }
     else if(key == '2') // Full
     {
         armed_status = FULLY_ARMED;
+        cli();
+        pir_enable();
         lcd_write_at_first_line("Mode: Full");
     }
     mode_change_period = 0; // Reset mode change period
     _delay_ms(1000);
     lcd_write_at_first_line("Master access");
+    if(key == '2')
+        sei(); // Re-enable global interrupts
 }
 
 void handle_master_login(void)
@@ -101,7 +137,8 @@ void handle_master_login(void)
         master_incorrect_attempts++; // Increment the incorrect attempts counter
         if(master_incorrect_attempts >= 3) {            // Master password is incorrect, handle accordingly
             master_incorrect_attempts = 0; // Reset attempts after showing message
-            beep(); // Call the beep function to indicate blocking
+            //beep(); // Call the beep function to indicate blocking
+            turn_on_buzzer(); // Turn on an Buzzer connected to PB0
             return;
         }
         else {
@@ -141,17 +178,22 @@ ISR(INT0_vect)
         {
             door_opened = 0;
             close_lock(); // Close the lock if it was opened
+            is_close_lock = 1;
+            _delay_ms(5000); // Keep the message on for 5 seconds
         }
         else 
         {
             door_opened = 1;
             lcd_write_at_first_line("Door Opened");
+            _delay_ms(1000); // Keep the message on for 1 seconds
         }
         return;
     }
-    if(armed_status == NOT_ARMED) return;
-    if(!is_authorized){
+    else if(armed_status == NOT_ARMED) return;
+    else if(!is_authorized){
         lcd_write_at_first_line("Unauthorized");
+		lcd_write_at_second_line("access");
+		send_sms_unauthorized_access();
         is_blocked = 1; // Set the blocked flag
         buzzer_type = 2; // Set buzzer type to continuous sound
         PORTB |= (1 << PB0); // Turn on an Buzzer connected to PB0
@@ -162,13 +204,40 @@ ISR(INT0_vect)
 // INT1 -> PIR (1)
 ISR(INT1_vect)
 {
-    if(!is_authorized){
-        lcd_write_at_first_line("Motion Detected");
+    if(!is_authorized)
+    {
+        lcd_write_at_first_line("Intruder");
+        lcd_write_at_second_line("detected");
+        send_sms_intruder(); // Send SMS for intruder detection
         is_blocked = 1; // Set the blocked flag
         buzzer_type = 2; // Set buzzer type to continuous sound
         PORTB |= (1 << PB0); // Turn on an Buzzer connected to PB0
         return; // Exit the ISR if not authorized
     }
+}
+
+// INT2 -> RFID
+ISR(INT2_vect)
+{
+    if(rfid_flag)
+    {
+        rfid_flag = 0;
+        return;
+    }
+    if(!is_authorized)
+    {
+        lcd_write_at_first_line("Access Granted");
+        _delay_ms(1000); // Keep the message on for 1 second
+        open_lock();
+        _delay_ms(1000);
+        is_authorized = 1; // Set the authorized flag
+    }
+}
+
+void rfid_init(void)
+{
+    GICR |= (1 << INT2);
+    MCUCSR &= ~(1 << ISC2);
 }
 
 void enable_int0(void)
@@ -203,21 +272,38 @@ void turn_off_buzzer(void)
     PORTB &= ~(1 << PB0);
 }
 
-void interrupt_init(void)
+// void interrupt_init(void)
+// {
+//     // GICR |= (1 << INT0);      // Enable external interrupt INT0
+// 	// GICR |= (1 << INT1);
+//     // MCUCR |= (0<< ISC01) | (1 << ISC00); // rising edge for INT0
+//     // MCUCR |= (0 << ISC11) | (1 << ISC10); // rising edge for INT1
+//     // GIFR |= (1 << INTF0);     // Clear any pending INT0 interrupt flag
+//     // DDRD &= ~(1 << PD2); // Set PD2 as input for INT0
+//     // PORTD |= (1 << PD2); // Enable pull-up resistor on PD2
+// }
+
+void reed_switch_enable(void)
 {
-    GICR |= (1 << INT0);      // Enable external interrupt INT0
-	GICR |= (1 << INT1);
-    MCUCR |= (0<< ISC01) | (1 << ISC00); // rising edge for INT0
-    MCUCR |= (0 << ISC11) | (1 << ISC10); // rising edge for INT1
-    // GIFR |= (1 << INTF0);     // Clear any pending INT0 interrupt flag
-    // DDRD &= ~(1 << PD2); // Set PD2 as input for INT0
-    // PORTD |= (1 << PD2); // Enable pull-up resistor on PD2
+    GICR |= (1 << INT0);
+    MCUCR |= (0 << ISC01) | (1 << ISC00); // any logical change for reed switch
+}
+
+void pir_enable(void)
+{
+    GICR |= (1 << INT1);
+    MCUCR |= (1 << ISC11) | (1 << ISC10); // rising edge for pir
+}
+
+void pir_disable(void)
+{
+    GICR &= ~(1 << INT1);
 }
 
 void keypad_init(void)
 {
     DDRA = 0x0F;
-    DDRB = 0xFF;
+    DDRB = 0xFB;
     PORTA = 0xFF;
 }
 
@@ -241,15 +327,18 @@ char keypad_characters[4][4] = {
 void open_lock(void)
 {
     is_lock_opened = 1; // Set the lock opened flag
-    PORTB |= (1 << PB1); // Open the lock by setting PB1 high
+    PORTB &= ~(1 << PB1); // Open the lock by setting PB1 high
+    //_delay_ms(1000); // Keep the lock open for 1 second
+    //PORTB |= (1 << PB1);
     lcd_write_at_first_line("Lock Opened");
 }
 
 void close_lock(void)
 {
     is_lock_opened = 0; // Reset the lock opened flag
-    is_authorized = 0; // Reset the authorized flag
-    PORTB &= ~(1 << PB1); // Close the lock by setting PB1 low
+    //is_authorized = 0; // Reset the authorized flag
+    //PORTB &= ~(1 << PB1); // Close the lock by setting PB1 low
+	PORTB |= (1 << PB1);
     lcd_write_at_first_line("Lock Closed");
     _delay_ms(1000); // Keep the message on for 1 second
     write_to_lcd_according_to_mode();
@@ -309,6 +398,7 @@ void keypad_scan(void)
         {
             // Password is correct, perform action
             lcd_write_at_first_line("Access Granted");
+            _delay_ms(1000); // Keep the message on for 1 second
             open_lock();
             _delay_ms(1000);
             is_authorized = 1; // Set the authorized flag
@@ -319,10 +409,12 @@ void keypad_scan(void)
             incorrect_attempts++; // Increment the incorrect attempts counter
             if(incorrect_attempts >= 3) {            // Password is incorrect, handle accordingly
                 lcd_write_at_first_line("System Blocked");
+                send_sms_multiple_attempts(); // Send SMS for multiple incorrect attempts
                 incorrect_attempts = 0; // Reset attempts after showing message
                 is_blocked = 1; // Set the blocked flag
 
-                beep(); // Call the beep function to indicate blocking
+                //beep(); // Call the beep function to indicate blocking
+                turn_on_buzzer(); // Turn on an Buzzer connected to PB0
                 return;
             }
             else {
@@ -357,6 +449,9 @@ void keypad_scan(void)
         if(is_blocked && is_master_logged_in)
         {
             turn_off_buzzer();
+			PORTB |= (1 << PB5);
+            PORTB |= (1 << PB3);
+            PORTB |= (1 << PB4);
             is_blocked = 0; // Reset the blocked flag
             lcd_write_at_first_line("System Enabled");
             _delay_ms(500);
@@ -422,7 +517,7 @@ void keypad_scan(void)
             buffer[star_size] = key;
             buffer[star_size + 1] = '\0';
             lcd_write_at_second_line(buffer); // Display the entered master password on the LCD
-            _delay_ms(15);
+            _delay_ms(250);
             buffer[star_size] = '*';
             lcd_write_at_second_line(buffer); // Display the entered master password as stars on the LCD
             if (master_password_length < MAX_PASSWORD_LENGTH) 
@@ -445,7 +540,7 @@ void keypad_scan(void)
         buffer[star_size] = key;
         buffer[star_size + 1] = '\0';
         lcd_write_at_second_line(buffer); // Display the entered password on the LCD
-        _delay_ms(15);
+        _delay_ms(250);
 
         buffer[star_size] = '*';
         lcd_write_at_second_line(buffer); // Display the entered password as stars on the LCD
@@ -460,9 +555,17 @@ void keypad_scan(void)
 
 int main(void)
 {
-    interrupt_init();
+    reed_switch_enable();
+    rfid_init();
     keypad_init(); // Initialize the keypad
+    //PORTB &= ~(1 << PB1); // Set PB1 low to close the lock initially
+    PORTB |= (1 << PB1); // Set PB1 high to close the lock initially
+    PORTB |= (1 << PB2);
+    PORTB |= (1 << PB3);
+    PORTB |= (1 << PB4);
+	PORTB |= (1 << PB5);
     LCD_DDR_DATA |= 0xF0; // D4-D7 ouotput
+    PORTD |= (1 << PD3); // Enable pull-up resistor on PD3
     LCD_DDR_CTRL |= (1 << RS) | (1 << E); // PC6, PC7 output
     lcd_init();
     lcd_write_at_first_line("Press # to open");
@@ -473,6 +576,13 @@ int main(void)
     {
         keypad_scan(); // Scan the keypad for key presses
         _delay_ms(100); // Add a small delay to debounce the keys
+        if(is_close_lock)
+        {
+            is_authorized = 0; // Reset the authorized flag
+            is_close_lock = 0; // Reset the close lock flag
+            rfid_flag = 1;
+            _delay_ms(5000);
+        }
     }
 }
 

@@ -1,0 +1,175 @@
+#include <SPI.h>
+#include <MFRC522.h>
+
+#define SS_PIN 53
+#define RST_PIN 49
+#define AUTH_OUTPUT_PIN 8
+
+
+#define SIM800 Serial1
+
+#define INTERRUPT_PIN_1 2    // Interrupt 0
+#define INTERRUPT_PIN_2 3    // Interrupt 1
+#define INTERRUPT_PIN_3 20   // Interrupt 3
+
+#define DEBOUNCE_DELAY 2000  // milliseconds
+
+MFRC522 mfrc522(SS_PIN, RST_PIN);
+
+volatile bool sendSMS1 = false;
+volatile bool sendSMS2 = false;
+volatile bool sendSMS3 = false;
+
+volatile unsigned long lastInterruptTime1 = 0;
+volatile unsigned long lastInterruptTime2 = 0;
+volatile unsigned long lastInterruptTime3 = 0;
+
+void setup() {
+  pinMode(INTERRUPT_PIN_1, INPUT_PULLUP);
+  pinMode(INTERRUPT_PIN_2, INPUT_PULLUP);
+  pinMode(INTERRUPT_PIN_3, INPUT_PULLUP);
+  pinMode(AUTH_OUTPUT_PIN, OUTPUT);
+  digitalWrite(AUTH_OUTPUT_PIN, HIGH); // default HIGH
+
+
+  attachInterrupt(digitalPinToInterrupt(INTERRUPT_PIN_1), isr1, FALLING);
+  attachInterrupt(digitalPinToInterrupt(INTERRUPT_PIN_2), isr2, FALLING);
+  attachInterrupt(digitalPinToInterrupt(INTERRUPT_PIN_3), isr3, FALLING);
+
+  Serial.begin(9600);
+  SIM800.begin(9600);
+  delay(3000);
+  SPI.begin();
+  mfrc522.PCD_Init();
+
+  Serial.println("System ready.");
+}
+
+void loop() {
+  if (sendSMS1) {
+    sendSMS1 = false;
+    Serial.println("Interrupt 1 detected. Sending Message 1...");
+    sendSMS("+8801722548545", "Alert!!\nDoor opened without authentication.");
+    waitForRelease(INTERRUPT_PIN_1);
+  }
+
+  if (sendSMS2) {
+    sendSMS2 = false;
+    Serial.println("Interrupt 2 detected. Sending Message 2...");
+    sendSMS("+8801722548545", "Alert!!\nMultiple failed attempts to unlock the door.");
+    waitForRelease(INTERRUPT_PIN_2);
+  }
+
+  if (sendSMS3) {
+    sendSMS3 = false;
+    Serial.println("Interrupt 3 detected. Sending Message 3...");
+    sendSMS("+8801722548545", "Alert!!\nUnauthorized person detected inside the warehouse");
+    waitForRelease(INTERRUPT_PIN_3);
+  }
+
+if (mfrc522.PICC_IsNewCardPresent()) {
+  if (mfrc522.PICC_ReadCardSerial()) {
+    Serial.print("Tag UID: ");
+    for (byte i = 0; i < mfrc522.uid.size; i++) {
+      Serial.print(mfrc522.uid.uidByte[i] < 0x10 ? " 0" : " ");
+      Serial.print(mfrc522.uid.uidByte[i], HEX);
+    }
+    Serial.println();
+
+    // Match against 3E 1D 0E 05
+    byte knownUID[4] = {0x3E, 0x1D, 0x0E, 0x05};
+    bool match = true;
+
+    if (mfrc522.uid.size != 4) {
+      match = false; // Wrong UID length
+    } else {
+      for (byte i = 0; i < 4; i++) {
+        if (mfrc522.uid.uidByte[i] != knownUID[i]) {
+          match = false;
+          break;
+        }
+      }
+    }
+
+    if (match) {
+      Serial.println("✅ Authorized UID detected.");
+      digitalWrite(AUTH_OUTPUT_PIN, LOW);  // Go LOW on authorized UID
+      delay(5000);
+      digitalWrite(AUTH_OUTPUT_PIN, HIGH);
+    } else {
+      Serial.println("❌ Unauthorized UID.");
+      //digitalWrite(AUTH_OUTPUT_PIN, HIGH); // Ensure it stays HIGH
+    }
+
+    mfrc522.PICC_HaltA();
+  }
+}
+
+
+  // Debug SIM800 responses
+  while (SIM800.available()) {
+    Serial.write(SIM800.read());
+  }
+}
+
+void isr1() {
+  unsigned long now = millis();
+  if (now - lastInterruptTime1 > DEBOUNCE_DELAY) {
+    delay(5000);
+    if(digitalRead(INTERRUPT_PIN_1) == LOW) sendSMS1 = true;
+    lastInterruptTime1 = now;
+  }
+}
+
+void isr2() {
+  unsigned long now = millis();
+  if (now - lastInterruptTime2 > DEBOUNCE_DELAY) {
+    delay(5000);
+    if(digitalRead(INTERRUPT_PIN_2) == LOW) sendSMS2 = true;
+    lastInterruptTime2 = now;
+  }
+}
+
+void isr3() {
+  unsigned long now = millis();
+  if (now - lastInterruptTime3 > DEBOUNCE_DELAY) {
+    delay(5000);
+    if(digitalRead(INTERRUPT_PIN_3) == LOW) sendSMS3 = true;
+    lastInterruptTime3 = now;
+  }
+}
+
+void waitForRelease(uint8_t pin) {
+  while (digitalRead(pin) == LOW) {
+    delay(10);
+  }
+  Serial.println("Button released.");
+}
+
+void sendSMS(const char* number, const char* message) {
+  SIM800.println("AT");
+  delay(1000);
+  printSIM800Response();
+
+  SIM800.println("AT+CMGF=1");
+  delay(1000);
+  printSIM800Response();
+
+  SIM800.print("AT+CMGS=\"");
+  SIM800.print(number);
+  SIM800.println("\"");
+  delay(1000);
+  printSIM800Response();
+
+  SIM800.print(message);
+  SIM800.write(26);  // Ctrl+Z
+  delay(5000);
+  printSIM800Response();
+}
+
+void printSIM800Response() {
+  while (SIM800.available()) {
+    char c = SIM800.read();
+    Serial.write(c);
+  }
+}
